@@ -1,6 +1,6 @@
 #![feature(get_mut_unchecked)]
 
-use rusb::{Context, request_type, RequestType, Recipient, Direction, DeviceHandle, UsbContext};
+use rusb::{Context, request_type, RequestType, Recipient, Direction, DeviceHandle, AsyncGroup, Transfer};
 use std::time::Duration;
 use byteorder::{LittleEndian, BigEndian, ReadBytesExt, ByteOrder, WriteBytesExt};
 use failure::format_err;
@@ -505,7 +505,7 @@ impl FT60x {
         })
     }
 
-    fn with_device<F: FnMut(&mut DeviceHandle<Context>) -> Result<T>, T>(&self, mut func: F) -> Result<T> {
+    fn with_device<F: FnMut(&mut DeviceHandle) -> Result<T>, T>(&self, mut func: F) -> Result<T> {
         let mut device = self.context
             .open_device_with_vid_pid(self.vid, self.pid)
             .ok_or_else(|| format_err!("No device with VID {:#x} and PID {:#x} was found", VID, PID))?;
@@ -513,12 +513,8 @@ impl FT60x {
         Ok(func(&mut device)?)
     }
 
-    fn as_device<F: FnMut(DeviceHandle<Context>) -> Result<T>, T>(self, mut func: F) -> Result<T> {
-        let mut device = self.context
-            .open_device_with_vid_pid(self.vid, self.pid)
-            .ok_or_else(|| format_err!("No device with VID {:#x} and PID {:#x} was found", VID, PID))?;
-
-        Ok(func(device)?)
+    fn as_device<F: FnMut(Context) -> Result<T>, T>(self, mut func: F) -> Result<T> {
+        Ok(func(self.context)?)
     }
 
     fn get_config(&self) -> Result<FT60xConfig> {
@@ -547,43 +543,69 @@ impl FT60x {
 
     // bufsize is in 32kb blocks
     fn on_data<F: FnMut(&[u8])>(self, mut func: F) -> Result<()> {
-        let _ = self.as_device(|mut device| {
-            device.claim_interface(0)?;
-            device.claim_interface(1)?;
+        let vid = self.vid;
+        let pid = self.pid;
 
-            let ctrlreq = [
-                0x00, 0x00, 0x00, 0x00, 0x82, 0x02, 0x00, 0x00, 0x00, 0x00,
-                0x00, 0x40, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00
-            ];
+        let _ = self.as_device(|mut context| {
+            let context = Arc::new(context);
+            {
+                let mut device = context
+                    .open_device_with_vid_pid(vid, pid)
+                    .ok_or_else(|| format_err!("No device with VID {:#x} and PID {:#x} was found", VID, PID)).unwrap();
 
-            device.write_bulk(0x01, &ctrlreq, Duration::new(1, 0))?;
+                device.claim_interface(0)?;
+                device.claim_interface(1)?;
+
+                let ctrlreq = [
+                    0x00, 0x00, 0x00, 0x00, 0x82, 0x02, 0x00, 0x00, 0x00, 0x00,
+                    0x00, 0x40, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00
+                ];
+
+                device.write_bulk(0x01, &ctrlreq, Duration::new(1, 0))?;
+            }
 
 
             const blocksize: usize = 32 * 1024; // 32 Kb
-            const bufsize: usize = blocksize * 1024 * 64 / 32; // 16Mb
+            const bufsize: usize = blocksize * 1024 * 16 / 32; // 16Mb
 
 
             #[derive(Clone)]
             struct DataSlice {
-                data: Vec<u8>
+                data: Vec<u8>,
             }
 
             impl Default for DataSlice {
                 fn default() -> Self {
                     DataSlice {
-                        data: vec![0; bufsize]
+                        data: vec![0; bufsize],
                     }
                 }
             }
 
-            let (mut producer, mut consumer) = RingBuf::<DataSlice>::create_channel(32);
+            let (mut producer, mut consumer) = RingBuf::<DataSlice>::create_channel(4);
 
+            let other_context = context.clone();
             std::thread::spawn(move || {
+                let mut device = other_context
+                    .open_device_with_vid_pid(vid, pid)
+                    .ok_or_else(|| format_err!("No device with VID {:#x} and PID {:#x} was found", VID, PID)).unwrap();
+                // let context = context;
                 loop {
                     producer.with_next_buffer(|buf| {
-                        for i in 0..(bufsize / blocksize) {
-                            let read = device.read_bulk(0x82, &mut buf.data[i * blocksize..(i + 1) * blocksize], Duration::new(1, 0)).unwrap();
-                            assert_eq!(read, blocksize);
+                        let mut async_group = AsyncGroup::new(&other_context);
+                        let mut i = 0;
+                        for chunk in buf.data.chunks_mut(blocksize) {
+                            // println!("{}", i);
+                            i += 1;
+                            async_group.submit(Transfer::bulk(&device, 0x82, chunk, Duration::new(1, 0))).unwrap();
+
+                            if i > 100 {
+                                assert_eq!(async_group.wait_any().unwrap().actual().len(), blocksize);
+                            }
+                        }
+
+                        while let Ok(mut transfer) = async_group.wait_any() {
+                            assert_eq!(transfer.actual().len(), blocksize);
                         }
                     })
                 }
