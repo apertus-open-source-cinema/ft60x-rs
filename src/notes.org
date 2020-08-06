@@ -1,0 +1,25 @@
+
+
+            // let mut buf = [0u8; 4];
+            // device.read_control(request_type(Direction::In, RequestType::Vendor, Recipient::Device),
+            //                     0xf1, 0, 0, &mut buf, Duration::new(60, 0))?;
+            // println!("{:#x?}", buf.to_vec());
+
+            // device.read_control(request_type(Direction::In, RequestType::Vendor, Recipient::Device),
+            //                     0x03, 1, 0x8400, &mut buf, Duration::new(60, 0))?;
+            // println!("{:#x?}", buf.to_vec());
+
+            // device.read_control(request_type(Direction::In, RequestType::Vendor, Recipient::Device),
+            //                     0x03, 1, 0x8000, &mut buf, Duration::new(60, 0))?;
+            // println!("{:#x?}", buf.to_vec());
+
+            // let ctrlreq = [0x00, 0x00, 0x00, 0x00, 0x82, 0x03, 0x00, 0x00, 0x00, 0xce, 0x7b, 0x76, 0xd5, 0x17, 0x52, 0xfc, 0x00, 0x00, 0x00, 0x00];
+            // device.write_bulk(0x01, &ctrlreq, Duration::new(1, 0))?;
+            // device.read_interrupt(0x81, &mut buf, Duration::new(1, 0))?;
+
+
+            // This one is working for starting transfers :)
+            // let ctrlreq = [0x00, 0x00, 0x00, 0x00, 0x82, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x40, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00];
+            // This one is not working for shutdown :)
+            // let ctrlreq = [0x00, 0x00, 0x00, 0x00, 0x82, 0x03, 0x00, 0x00, 0x00, 0x00, 0x00, 0x40, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00];
+            // device.write_bulk(0x01, &ctrlreq, Duration::new(1, 0))?;
