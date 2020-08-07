@@ -1,0 +1,24 @@
+name: cargo check
+
+on: [push, pull_request]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@v2
+    - name: install nightly rust
+      uses: actions-rs/toolchain@v1
+      with:
+        override: true
+        profile: minimal
+        toolchain: nightly
+    - name: check
+      uses: actions-rs/cargo@v1
+      with:
+        command: check
