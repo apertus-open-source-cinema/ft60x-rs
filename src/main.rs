@@ -9,6 +9,7 @@ use std::time::SystemTime;
 use std::sync::{Arc, mpsc::{Sender, Receiver}};
 use bitflags::bitflags;
 use std::pin::Pin;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 const VID: u16 = 0x0403;
 const PID: u16 = 0x601f;
@@ -412,6 +413,18 @@ struct RingBufConsumer<T> {
     lastknown_next_write_pos: usize,
 }
 
+impl<T> Drop for RingBufConsumer<T> {
+    fn drop(&mut self) {
+        self.cancel()
+    }
+}
+
+impl<T> Drop for RingBufProducer<T> {
+    fn drop(&mut self) {
+        self.cancel()
+    }
+}
+
 impl<T> RingBufProducer<T> {
     fn new(ringbuf: Arc<RingBuf<T>>, next_write_pos_sink: Sender<usize>, last_read_pos: Receiver<usize>) -> Self {
         let cap = ringbuf.capacity - 1;
@@ -424,19 +437,33 @@ impl<T> RingBufProducer<T> {
         }
     }
 
-    fn with_next_buffer<F: FnMut(&mut T)>(&mut self, mut func: F) {
-        self.lastknown_last_read_pos = std::iter::once(self.lastknown_last_read_pos).chain(self.last_read_pos.iter()).find(|last_read_pos| {
-           self.next_write_pos - last_read_pos < self.ringbuf.capacity
-        }).unwrap();
+    fn cancel(&mut self) {
+        self.ringbuf.one_was_dropped.store(true, Ordering::Relaxed);
+        self.next_write_pos_sink.send(self.next_write_pos).unwrap();
+    }
+
+    fn with_next_buffer<F: FnMut(&mut T) -> R, R>(&mut self, mut func: F) -> std::result::Result<R, ()> {
+        for last_read_pos in std::iter::once(self.lastknown_last_read_pos).chain(self.last_read_pos.iter()) {
+            if self.ringbuf.one_was_dropped.load(Ordering::Relaxed) {
+                return Err(())
+            }
+
+            if (self.next_write_pos - last_read_pos) < self.ringbuf.capacity {
+                self.lastknown_last_read_pos = last_read_pos;
+                break;
+            }
+        }
 
         let pos = self.next_write_pos % self.ringbuf.capacity;
 
-        unsafe {
-            &mut func(&mut Arc::get_mut_unchecked(&mut self.ringbuf).buffer[pos]);
-        }
+        let ret = unsafe {
+            func(&mut Arc::get_mut_unchecked(&mut self.ringbuf).buffer[pos])
+        };
 
         self.next_write_pos += 1;
         self.next_write_pos_sink.send(self.next_write_pos).unwrap();
+
+        Ok(ret)
     }
 }
 
@@ -451,38 +478,54 @@ impl<T> RingBufConsumer<T> {
         }
     }
 
-    fn with_next_buffer<F: FnMut(&T)>(&mut self, mut func: F) {
-        self.lastknown_next_write_pos = std::iter::once(self.lastknown_next_write_pos).chain(self.next_write_pos.iter()).find(|next_write_pos| {
-            *next_write_pos > self.next_read_pos
-        }).unwrap();
+    fn cancel(&mut self) {
+        self.ringbuf.one_was_dropped.store(true, Ordering::Relaxed);
+        self.last_read_pos.send(self.next_read_pos - 1).unwrap();
+    }
+
+    fn with_next_buffer<F: FnMut(&T) -> R, R>(&mut self, mut func: F) -> std::result::Result<R, ()> {
+        for next_write_pos in std::iter::once(self.lastknown_next_write_pos).chain(self.next_write_pos.iter()) {
+            if self.ringbuf.one_was_dropped.load(Ordering::Relaxed) {
+                return Err(())
+            }
+
+            if next_write_pos > self.next_read_pos {
+                self.lastknown_next_write_pos = next_write_pos;
+                break
+            }
+        }
 
         let pos = self.next_read_pos % self.ringbuf.capacity;
-        &mut func(&self.ringbuf.buffer[pos]);
+        let ret = func(&self.ringbuf.buffer[pos]);
 
         self.last_read_pos.send(self.next_read_pos).unwrap();
 
         self.next_read_pos += 1;
+
+        Ok(ret)
     }
 }
 
 
 struct RingBuf<T> {
     buffer: Vec<T>,
-    capacity: usize
+    capacity: usize,
+    one_was_dropped: AtomicBool
 }
 
 impl<T: Default + Clone> RingBuf<T> {
-    fn new(capacity: usize) -> Self {
+    fn new(capacity: usize, default: T) -> Self {
         assert!(capacity != 1, "Use a RwLock for capacity 1");
 
         RingBuf {
-            buffer: vec![Default::default(); capacity],
-            capacity
+            buffer: vec![default; capacity],
+            capacity,
+            one_was_dropped: AtomicBool::new(false)
         }
     }
 
-    fn create_channel(capacity: usize) -> (RingBufProducer<T>, RingBufConsumer<T>) {
-        let ringbuf = Arc::new(RingBuf::new(capacity));
+    fn create_channel_with_default_value(capacity: usize, default: T) -> (RingBufProducer<T>, RingBufConsumer<T>) {
+        let ringbuf = Arc::new(RingBuf::new(capacity, default));
 
         let (next_write_pos_sink, next_write_pos_receiver) = std::sync::mpsc::channel();
         let (last_read_pos_sender, last_read_pos_receiver) = std::sync::mpsc::channel();
@@ -491,6 +534,10 @@ impl<T: Default + Clone> RingBuf<T> {
         let consumer = RingBufConsumer::new(ringbuf.clone(), next_write_pos_receiver, last_read_pos_sender);
 
         (producer, consumer)
+    }
+
+    fn create_channel(capacity: usize) -> (RingBufProducer<T>, RingBufConsumer<T>) {
+        Self::create_channel_with_default_value(capacity, Default::default())
     }
 }
 
@@ -505,16 +552,16 @@ impl FT60x {
         })
     }
 
-    fn with_device<F: FnMut(&mut DeviceHandle) -> Result<T>, T>(&self, mut func: F) -> Result<T> {
-        let mut device = self.context
-            .open_device_with_vid_pid(self.vid, self.pid)
-            .ok_or_else(|| format_err!("No device with VID {:#x} and PID {:#x} was found", VID, PID))?;
+    fn with_device_helper<F: FnMut(&mut DeviceHandle) -> Result<T>, T>(context: &Context,  vid: u16, pid: u16, mut func: F) -> Result<T> {
+        let mut device = context
+            .open_device_with_vid_pid(vid, pid)
+            .ok_or_else(|| format_err!("No device with VID {:#x} and PID {:#x} was found", vid, pid))?;
 
         Ok(func(&mut device)?)
     }
 
-    fn as_device<F: FnMut(Context) -> Result<T>, T>(self, mut func: F) -> Result<T> {
-        Ok(func(self.context)?)
+    fn with_device<F: FnMut(&mut DeviceHandle) -> Result<T>, T>(&self, mut func: F) -> Result<T> {
+        Self::with_device_helper(&self.context, self.vid, self.pid, func)
     }
 
     fn get_config(&self) -> Result<FT60xConfig> {
@@ -541,65 +588,46 @@ impl FT60x {
         Ok(())
     }
 
+    fn set_streaming_mode(&self) -> Result<()> {
+        self.with_device(|device| {
+            device.claim_interface(0)?;
+            device.claim_interface(1)?;
+
+            let ctrlreq = [
+                0x00, 0x00, 0x00, 0x00, 0x82, 0x02, 0x00, 0x00, 0x00, 0x00,
+                0x00, 0x40, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00
+            ];
+
+            device.write_bulk(0x01, &ctrlreq, Duration::new(1, 0))?;
+
+            Ok(())
+        })?;
+
+        Ok(())
+    }
+
     // bufsize is in 32kb blocks
-    fn on_data<F: FnMut(&[u8])>(self, mut func: F) -> Result<()> {
-        let vid = self.vid;
-        let pid = self.pid;
+    fn data_stream(self, bufsize: usize) -> Result<RingBufConsumer<Vec<u8>>> {
+        let blocksize: usize = 32 * 1024; // 32 Kb
+        let bufsize: usize = blocksize * bufsize;
 
-        let _ = self.as_device(|mut context| {
-            let context = Arc::new(context);
-            {
-                let mut device = context
-                    .open_device_with_vid_pid(vid, pid)
-                    .ok_or_else(|| format_err!("No device with VID {:#x} and PID {:#x} was found", VID, PID)).unwrap();
+        self.set_streaming_mode()?;
 
-                device.claim_interface(0)?;
-                device.claim_interface(1)?;
+        let (mut producer, mut consumer) = RingBuf::<Vec<u8>>::create_channel_with_default_value(4, vec![0u8; bufsize]);
 
-                let ctrlreq = [
-                    0x00, 0x00, 0x00, 0x00, 0x82, 0x02, 0x00, 0x00, 0x00, 0x00,
-                    0x00, 0x40, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00
-                ];
-
-                device.write_bulk(0x01, &ctrlreq, Duration::new(1, 0))?;
-            }
-
-
-            const blocksize: usize = 32 * 1024; // 32 Kb
-            const bufsize: usize = blocksize * 1024 * 16 / 32; // 16Mb
-
-
-            #[derive(Clone)]
-            struct DataSlice {
-                data: Vec<u8>,
-            }
-
-            impl Default for DataSlice {
-                fn default() -> Self {
-                    DataSlice {
-                        data: vec![0; bufsize],
-                    }
-                }
-            }
-
-            let (mut producer, mut consumer) = RingBuf::<DataSlice>::create_channel(4);
-
-            let other_context = context.clone();
-            std::thread::spawn(move || {
-                let mut device = other_context
-                    .open_device_with_vid_pid(vid, pid)
-                    .ok_or_else(|| format_err!("No device with VID {:#x} and PID {:#x} was found", VID, PID)).unwrap();
-                // let context = context;
+        std::thread::spawn(move || {
+            Self::with_device_helper(&self.context, self.vid, self.pid, |device| {
                 loop {
-                    producer.with_next_buffer(|buf| {
-                        let mut async_group = AsyncGroup::new(&other_context);
+                    match producer.with_next_buffer(|buf| {
+                        let mut async_group = AsyncGroup::new(&self.context);
                         let mut i = 0;
-                        for chunk in buf.data.chunks_mut(blocksize) {
-                            // println!("{}", i);
+                        for chunk in buf.chunks_mut(blocksize) {
                             i += 1;
+
                             async_group.submit(Transfer::bulk(&device, 0x82, chunk, Duration::new(1, 0))).unwrap();
 
-                            if i > 100 {
+                            // The FT60x doesn't seem to like too many outstanding requests
+                            if i > 50 {
                                 assert_eq!(async_group.wait_any().unwrap().actual().len(), blocksize);
                             }
                         }
@@ -607,22 +635,18 @@ impl FT60x {
                         while let Ok(mut transfer) = async_group.wait_any() {
                             assert_eq!(transfer.actual().len(), blocksize);
                         }
-                    })
+                    }) {
+                        Ok(_) => continue,
+                        Err(e) => break
+                    }
                 }
 
+                Ok(())
             });
+        });
 
-            loop {
-                consumer.with_next_buffer(|buf| {
-                    &mut func(&buf.data[..]);
-                })
-            }
 
-            // device.write_bulk(0x01, &ctrlreq, Duration::new(1, 0))?;
-            Ok(())
-        })?;
-
-        Ok(())
+        Ok(consumer)
     }
 }
 
@@ -647,23 +671,39 @@ fn main() -> Result<()> {
 
     let mut start = SystemTime::now();
     let mut last = 0u16;
-    ft60x.on_data(|buf| {
-        let elapsed = start.elapsed().unwrap().as_secs_f64();
-        start = SystemTime::now();
-        let bytes = buf.len() as f64;
 
-        // let mut cursor = Cursor::new(&buf[..]);
+    let mut consumer = ft60x.data_stream(1024 * 16 / 32)?;
+    let mut i = 0;
 
-        // while let (Ok(i), Ok(_)) = (cursor.read_u16::<LittleEndian>(), cursor.read_u16::<LittleEndian>()) {
-        //     if last.overflowing_add(1).0 != i {
-        //         println!("miss {} {}", last, i);
-        //     }
+    loop {
+        i += 1;
 
-        //     last = i;
+        // if i > 1000 {
+        //     consumer.cancel();
         // }
 
-        println!("elapsed (for {} Mb) {}s = {} MB/s", bytes / 1024. / 1024., elapsed, bytes / 1024. / 1024. / elapsed);
-    })?;
+        match consumer.with_next_buffer(|buf| {
+            let elapsed = start.elapsed().unwrap().as_secs_f64();
+            start = SystemTime::now();
+            let bytes = buf.len() as f64;
+
+            // let mut cursor = Cursor::new(&buf[..]);
+
+            // while let (Ok(i), Ok(_)) = (cursor.read_u16::<LittleEndian>(), cursor.read_u16::<LittleEndian>()) {
+            //     if last.overflowing_add(1).0 != i {
+            //         println!("miss {} {}", last, i);
+            //     }
+
+            //     last = i;
+            // }
+
+            println!("elapsed (for {} Mb) {}s = {} MB/s", bytes / 1024. / 1024., elapsed, bytes / 1024. / 1024. / elapsed);
+        }) {
+            Ok(_) => continue,
+            Err(e) => break
+        }
+
+    }
 
     // let mut buf = vec![0u8; 32 * 1024];
 
@@ -696,7 +736,7 @@ fn main() -> Result<()> {
     //             }
 
     //             last = *val;
-    //         })
+    //         });
     //     }
     // });
 
@@ -707,7 +747,7 @@ fn main() -> Result<()> {
     //         producer.with_next_buffer(|val| {
     //             // i += 1;
     //             *val = i;
-    //         })
+    //         });
     //     }
     // }).join();
 
