@@ -13,16 +13,13 @@ fn main() -> Result<()> {
     let mut consumer = ft60x.data_stream(1024 * 16 / 32)?;
 
     let mut start = SystemTime::now();
-    let mut last = 0u16;
+    let mut last = 0u32;
     while consumer
         .with_next_buffer(|buf| {
             let mut cursor = Cursor::new(&buf[..]);
-            while let (Ok(i), Ok(_)) = (
-                cursor.read_u16::<LittleEndian>(),
-                cursor.read_u16::<LittleEndian>(),
-            ) {
+            while let Ok(i) = cursor.read_u32::<LittleEndian>() {
                 if last.overflowing_add(1).0 != i {
-                    eprintln!("miss {} {}", last, i);
+                    eprintln!("miss! last: {}; next: {}", last, i);
                 }
 
                 last = i;
