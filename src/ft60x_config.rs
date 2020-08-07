@@ -351,45 +351,29 @@ pub mod ft60x_flash_rom_detection {
 
         pub fn encode(&self) -> u8 {
             let mut flags = 0;
-
-            match self.memory_type {
-                MemoryType::ROM => flags |= 1 << 0,
-                _ => {}
+            if let MemoryType::ROM = self.memory_type {
+                flags |= 1 << 0
             }
-
-            match self.memory_status {
-                MemoryStatus::ExistsNot => flags |= 1 << 1,
-                _ => {}
+            if let MemoryStatus::ExistsNot = self.memory_status {
+                flags |= 1 << 1
             }
-
-            match self.custom_config_validity {
-                CustomConfigValidity::Invalid => flags |= 1 << 2,
-                _ => {}
+            if let CustomConfigValidity::Invalid = self.custom_config_validity {
+                flags |= 1 << 2
             }
-
-            match self.custom_config_checksum {
-                CustomConfigChecksum::Invalid => flags |= 1 << 3,
-                _ => {}
+            if let CustomConfigChecksum::Invalid = self.custom_config_checksum {
+                flags |= 1 << 3
             }
-
-            match self.config_used {
-                ConfigUsed::Custom => flags |= 1 << 4,
-                _ => {}
+            if let ConfigUsed::Custom = self.config_used {
+                flags |= 1 << 4
             }
-
-            match self.gpio_input {
-                GPIOInput::Used => flags |= 1 << 5,
-                _ => {}
+            if let GPIOInput::Used = self.gpio_input {
+                flags |= 1 << 5
             }
-
-            match self.gpio0 {
-                GPIO0::High => flags |= 1 << 6,
-                _ => {}
+            if let GPIO0::High = self.gpio0 {
+                flags |= 1 << 6
             }
-
-            match self.gpio1 {
-                GPIO1::High => flags |= 1 << 7,
-                _ => {}
+            if let GPIO1::High = self.gpio1 {
+                flags |= 1 << 7
             }
 
             flags

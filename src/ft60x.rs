@@ -60,7 +60,7 @@ impl FT60x {
     }
 
     pub fn set_config(&self, config: FT60xConfig) -> Result<()> {
-        let mut buf = config.encode()?;
+        let buf = config.encode()?;
         println!("{:?}", buf.to_vec());
         let written = self.with_device(|device| {
             Ok(device.write_control(
@@ -68,7 +68,7 @@ impl FT60x {
                 0xcf,
                 0,
                 0,
-                &mut buf,
+                &buf,
                 Duration::new(1, 0),
             )?)
         })?;
@@ -90,13 +90,10 @@ impl FT60x {
 
         std::thread::spawn(move || {
             Self::with_device_helper(&self.context, self.vid, self.pid, |device| {
-                loop {
-                    match producer.with_next_buffer(|buf| {
+                while producer
+                    .with_next_buffer(|buf| {
                         let mut async_group = AsyncGroup::new(&self.context);
-                        let mut i = 0;
-                        for chunk in buf.chunks_mut(blocksize) {
-                            i += 1;
-
+                        for (i, chunk) in buf.chunks_mut(blocksize).enumerate() {
                             async_group
                                 .submit(Transfer::bulk(&device, 0x82, chunk, Duration::new(1, 0)))
                                 .unwrap();
@@ -113,11 +110,9 @@ impl FT60x {
                         while let Ok(mut transfer) = async_group.wait_any() {
                             assert_eq!(transfer.actual().len(), blocksize);
                         }
-                    }) {
-                        Ok(_) => continue,
-                        Err(_) => break,
-                    }
-                }
+                    })
+                    .is_ok()
+                {}
 
                 Ok(())
             })

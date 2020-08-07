@@ -30,11 +30,7 @@ impl<T: Default + Clone> RingBuf<T> {
 
         let producer =
             RingBufProducer::new(ringbuf.clone(), next_write_pos_sink, last_read_pos_receiver);
-        let consumer = RingBufConsumer::new(
-            ringbuf.clone(),
-            next_write_pos_receiver,
-            last_read_pos_sender,
-        );
+        let consumer = RingBufConsumer::new(ringbuf, next_write_pos_receiver, last_read_pos_sender);
 
         (producer, consumer)
     }

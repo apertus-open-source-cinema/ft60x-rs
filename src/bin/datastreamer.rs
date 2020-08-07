@@ -12,8 +12,8 @@ fn main() -> Result<()> {
     let mut consumer = ft60x.data_stream(1024 * 16 / 32)?;
 
     let mut start = SystemTime::now();
-    loop {
-        match consumer.with_next_buffer(|buf| {
+    while consumer
+        .with_next_buffer(|buf| {
             io::stdout().write_all(buf).unwrap();
 
             let bytes = buf.len() as f64;
@@ -25,11 +25,9 @@ fn main() -> Result<()> {
                 elapsed,
                 bytes / 1024. / 1024. / elapsed
             );
-        }) {
-            Ok(_) => continue,
-            Err(_) => break,
-        }
-    }
+        })
+        .is_ok()
+    {}
 
     Ok(())
 }

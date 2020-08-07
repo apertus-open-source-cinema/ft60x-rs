@@ -14,8 +14,8 @@ fn main() -> Result<()> {
 
     let mut start = SystemTime::now();
     let mut last = 0u16;
-    loop {
-        match consumer.with_next_buffer(|buf| {
+    while consumer
+        .with_next_buffer(|buf| {
             let mut cursor = Cursor::new(&buf[..]);
             while let (Ok(i), Ok(_)) = (
                 cursor.read_u16::<LittleEndian>(),
@@ -37,11 +37,9 @@ fn main() -> Result<()> {
                 elapsed,
                 bytes / 1024. / 1024. / elapsed
             );
-        }) {
-            Ok(_) => continue,
-            Err(_) => break,
-        }
-    }
+        })
+        .is_ok()
+    {}
 
     Ok(())
 }
