@@ -27,10 +27,16 @@ impl FT60x {
                     .as_ref()
                     .ok_or_else(|| format_err!("null pointer for context received"))?
                     .open_device_with_vid_pid(vid, pid)
-                    .ok_or_else(|| { format_err!("No device with VID {:#x} and PID {:#x} was found", vid, pid) })?,
+                    .ok_or_else(|| {
+                        format_err!("No device with VID {:#x} and PID {:#x} was found", vid, pid)
+                    })?,
             ))
         });
-        Ok(FT60x { context, device: device?, streaming_mode: false })
+        Ok(FT60x {
+            context,
+            device: device?,
+            streaming_mode: false,
+        })
     }
 
     pub fn get_config(&self) -> Result<FT60xConfig> {
@@ -73,7 +79,8 @@ impl FT60x {
                 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
             ];
 
-            self.device.write_bulk(0x01, &ctrlreq, Duration::new(1, 0))?;
+            self.device
+                .write_bulk(0x01, &ctrlreq, Duration::new(1, 0))?;
             self.streaming_mode = true;
         }
         Ok(())
@@ -81,39 +88,31 @@ impl FT60x {
 
     /// it es recommended to read multiples of 32Kb
     pub fn read_exact(&mut self, buf: &mut [u8]) -> Result<()> {
-        if buf.len() == 0 { return Ok(()); }
-
         self.set_streaming_mode()?;
 
         let blocksize: usize = 32 * 1024; // 32 Kb seems to be the sweet spot for the ft601
         let mut_chunks = buf.chunks_mut(blocksize);
         let mut_chunks_len = mut_chunks.len();
         let mut collected = 0;
-        let mut last_len = 0;
 
         let mut async_group = AsyncGroup::new(&self.context);
         for (i, chunk) in mut_chunks.enumerate() {
-            if i == mut_chunks_len - 1 { last_len = chunk.len() }
-            async_group.submit(Transfer::bulk(&self.device, 0x82, chunk, Duration::new(1, 0)))?;
+            async_group.submit(Transfer::bulk(
+                &self.device,
+                0x82,
+                chunk,
+                Duration::new(1, 0),
+            ))?;
 
             // The FT60x doesn't seem to like too many outstanding requests
             if i > 50 {
-                let real_len = async_group.wait_any()?.actual().len();
-                if collected == mut_chunks_len - 1 {
-                    assert_eq!(real_len, last_len);
-                } else {
-                    assert_eq!(real_len, blocksize);
-                }
+                let mut transfer = async_group.wait_any()?;
+                assert_eq!(transfer.buffer().len(), transfer.actual().len());
                 collected += 1;
             }
         }
         while let Ok(mut transfer) = async_group.wait_any() {
-            let real_len = transfer.actual().len();
-            if collected == mut_chunks_len - 1 {
-                assert_eq!(real_len, last_len);
-            } else {
-                assert_eq!(real_len, blocksize);
-            }
+            assert_eq!(transfer.buffer().len(), transfer.actual().len());
             collected += 1;
         }
         assert_eq!(collected, mut_chunks_len);
@@ -123,13 +122,12 @@ impl FT60x {
 
     /// it es recommended to request multiples of 32Kb
     pub fn data_stream(mut self, bufsize: usize) -> Result<RingBufConsumer<Vec<u8>>> {
-        let (mut producer, consumer) = RingBuf::<Vec<u8>>::create_channel_with_default_value(4, vec![0u8; bufsize]);
+        let (mut producer, consumer) =
+            RingBuf::<Vec<u8>>::create_channel_with_default_value(4, vec![0u8; bufsize]);
 
         std::thread::spawn(move || {
             while producer
-                .with_next_buffer(|buf| {
-                    self.read_exact(buf)
-                })
+                .with_next_buffer(|buf| self.read_exact(buf))
                 .is_ok()
             {}
         });
