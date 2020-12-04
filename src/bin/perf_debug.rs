@@ -1,5 +1,5 @@
-// prints the recieved stream as 2 16 bit values.
-// usefull for debugging performance
+// prints the received stream as 2 16 bit values.
+// useful for debugging performance
 
 use byteorder::{LittleEndian, ReadBytesExt};
 use ft60x::ft60x::{FT60x, DEFAULT_PID, DEFAULT_VID};
@@ -10,7 +10,7 @@ type Result<T> = std::result::Result<T, failure::Error>;
 
 fn main() -> Result<()> {
     let ft60x = FT60x::new(DEFAULT_VID, DEFAULT_PID)?;
-    let mut consumer = ft60x.data_stream(1024 * 16 / 32)?;
+    let mut consumer = ft60x.data_stream(1024 * 1024 * 512)?;
 
     let mut start = SystemTime::now();
     let mut last_i = 0;

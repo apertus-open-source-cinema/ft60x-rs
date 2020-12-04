@@ -7,29 +7,33 @@ use crate::ft60x_config::FT60xConfig;
 use crate::ringbuf::{RingBuf, RingBufConsumer};
 use crate::Result;
 use failure::format_err;
-use lazy_static::lazy_static;
+use owning_ref::OwningHandle;
+use std::sync::Arc;
 
 pub const DEFAULT_PID: u16 = 0x601f;
 pub const DEFAULT_VID: u16 = 0x0403;
 
-lazy_static! {
-    static ref CONTEXT: Context = Context::new().unwrap();
-}
-
 pub struct FT60x {
-    device: DeviceHandle<'static>,
+    context: Arc<Context>,
+    device: OwningHandle<Arc<Context>, Box<DeviceHandle<'static>>>,
     streaming_mode: bool,
 }
 impl FT60x {
     pub fn new(vid: u16, pid: u16) -> Result<Self> {
-        let device =
-            CONTEXT
-                .open_device_with_vid_pid(vid, pid)
-                .ok_or_else(|| format_err!("No device with VID {:#x} and PID {:#x} was found", vid, pid))?;
-        Ok(Self { device, streaming_mode: false })
+        let context = Arc::new(Context::new()?);
+        let device: Result<_> = OwningHandle::try_new(context.clone(), |context| unsafe {
+            Ok(Box::new(
+                context
+                    .as_ref()
+                    .ok_or_else(|| format_err!("null pointer for context received"))?
+                    .open_device_with_vid_pid(vid, pid)
+                    .ok_or_else(|| { format_err!("No device with VID {:#x} and PID {:#x} was found", vid, pid) })?,
+            ))
+        });
+        Ok(FT60x { context, device: device?, streaming_mode: false })
     }
 
-    pub fn get_config(&mut self) -> Result<FT60xConfig> {
+    pub fn get_config(&self) -> Result<FT60xConfig> {
         let mut buf = [0; 152];
         let read = self.device.read_control(
             request_type(Direction::In, RequestType::Vendor, Recipient::Device),
@@ -75,45 +79,56 @@ impl FT60x {
         Ok(())
     }
 
+    /// it es recommended to read multiples of 32Kb
     pub fn read_exact(&mut self, buf: &mut [u8]) -> Result<()> {
+        if buf.len() == 0 { return Ok(()); }
+
         self.set_streaming_mode()?;
 
         let blocksize: usize = 32 * 1024; // 32 Kb seems to be the sweet spot for the ft601
-        let mut async_group = AsyncGroup::new(&CONTEXT);
-        for (i, chunk) in buf.chunks_mut(blocksize).enumerate() {
-            async_group
-                .submit(Transfer::bulk(&self.device, 0x82, chunk, Duration::new(1, 0)))
-                .unwrap();
+        let mut_chunks = buf.chunks_mut(blocksize);
+        let mut_chunks_len = mut_chunks.len();
+        let mut collected = 0;
+        let mut last_len = 0;
+
+        let mut async_group = AsyncGroup::new(&self.context);
+        for (i, chunk) in mut_chunks.enumerate() {
+            if i == mut_chunks_len - 1 { last_len = chunk.len() }
+            async_group.submit(Transfer::bulk(&self.device, 0x82, chunk, Duration::new(1, 0)))?;
 
             // The FT60x doesn't seem to like too many outstanding requests
             if i > 50 {
-                let real_len = async_group.wait_any().unwrap().actual().len();
-                //eprintln!("{}", real_len);
-                assert_eq!(
-                    real_len,
-                    blocksize
-                );
+                let real_len = async_group.wait_any()?.actual().len();
+                if collected == mut_chunks_len - 1 {
+                    assert_eq!(real_len, last_len);
+                } else {
+                    assert_eq!(real_len, blocksize);
+                }
+                collected += 1;
             }
         }
-
         while let Ok(mut transfer) = async_group.wait_any() {
-            assert_eq!(transfer.actual().len(), blocksize);
+            let real_len = transfer.actual().len();
+            if collected == mut_chunks_len - 1 {
+                assert_eq!(real_len, last_len);
+            } else {
+                assert_eq!(real_len, blocksize);
+            }
+            collected += 1;
         }
+        assert_eq!(collected, mut_chunks_len);
 
         Ok(())
     }
 
-    /// bufsize is in 32kb blocks
+    /// it es recommended to request multiples of 32Kb
     pub fn data_stream(mut self, bufsize: usize) -> Result<RingBufConsumer<Vec<u8>>> {
-        let blocksize: usize = 32 * 1024; // 32 Kb seems to be the sweet spot for the ft601
-        let bufsize: usize = blocksize * bufsize;
-
-        let (mut producer, consumer) =
-            RingBuf::<Vec<u8>>::create_channel_with_default_value(4, vec![0u8; bufsize]);
+        let (mut producer, consumer) = RingBuf::<Vec<u8>>::create_channel_with_default_value(4, vec![0u8; bufsize]);
 
         std::thread::spawn(move || {
-            while producer.with_next_buffer(|buf| {
-                    self.read_exact(buf).unwrap();
+            while producer
+                .with_next_buffer(|buf| {
+                    self.read_exact(buf)
                 })
                 .is_ok()
             {}

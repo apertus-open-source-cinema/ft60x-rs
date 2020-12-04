@@ -10,7 +10,7 @@ type Result<T> = std::result::Result<T, failure::Error>;
 
 fn main() -> Result<()> {
     let ft60x = FT60x::new(DEFAULT_VID, DEFAULT_PID)?;
-    let mut consumer = ft60x.data_stream(1024 * 16 / 32)?;
+    let mut consumer = ft60x.data_stream(1024 * 1024 * 512)?;
 
     let mut start = SystemTime::now();
     let mut last = 0u32;
