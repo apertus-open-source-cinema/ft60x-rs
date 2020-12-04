@@ -1,5 +1,5 @@
-// checks that the received stream forms a consecutive counter when interpreted as 32 bit unsigned values.
-// useful for ensuring that no data is lost
+// prints the recieved stream as 2 16 bit values.
+// usefull for debugging performance
 
 use byteorder::{LittleEndian, ReadBytesExt};
 use ft60x::ft60x::{FT60x, DEFAULT_PID, DEFAULT_VID};
@@ -13,16 +13,18 @@ fn main() -> Result<()> {
     let mut consumer = ft60x.data_stream(1024 * 16 / 32)?;
 
     let mut start = SystemTime::now();
-    let mut last = 0u32;
+    let mut last_i = 0;
     while consumer
         .with_next_buffer(|buf| {
             let mut cursor = Cursor::new(&buf[..]);
-            while let Ok(i) = cursor.read_u32::<LittleEndian>() {
-                if last.overflowing_add(1).0 != i {
-                    eprintln!("miss! last: {}; next: {}", last, i);
+            while let (Ok(i), Ok(j)) = (
+                cursor.read_u16::<LittleEndian>(),
+                cursor.read_u16::<LittleEndian>(),
+            ) {
+                if j > 0 {
+                    eprintln!("{}, {}", last_i, j);
                 }
-
-                last = i;
+                last_i = i;
             }
 
             let bytes = buf.len() as f64;
