@@ -1,6 +1,5 @@
 use crate::Result;
 use byteorder::{LittleEndian, ReadBytesExt, WriteBytesExt};
-use failure::format_err;
 use std::io::{Cursor, Read, Write};
 
 #[derive(Debug)]
@@ -32,19 +31,19 @@ impl FT60xConfig {
         let pid = data.read_u16::<LittleEndian>()?;
 
         let mut strings_buf = [0u8; 128];
-        assert_eq!(data.read(&mut strings_buf)?, 128);
+        ensure!(data.read(&mut strings_buf)? == 128);
 
         fn parse_string(bytes: &[u8]) -> Result<(String, u8)> {
             let offset = bytes[0];
             let length = (offset - 2) >> 1;
 
-            assert_eq!(bytes[1], 0x3);
+            ensure!(bytes[1] == 0x3);
 
             let mut res = String::new();
 
             for i in 0..(length as usize) {
                 res += std::str::from_utf8(&[bytes[2 * i + 2]])?;
-                assert_eq!(bytes[2 * i + 2 + 1], 0);
+                ensure!(bytes[2 * i + 2 + 1] == 0);
             }
 
             Ok((res, offset))
@@ -161,7 +160,10 @@ impl FT60xFifoMode {
         match num {
             0 => Ok(Self::Mode245),
             1 => Ok(Self::Mode600),
-            _ => Err(format_err!("Unknown fifo mode configuration {}", num)),
+            _ => Err(format_general_err!(
+                "Unknown fifo mode configuration {}",
+                num
+            )),
         }
     }
 
@@ -188,7 +190,10 @@ impl FT60xFifoClock {
             1 => Ok(Self::Clock66MHz),
             2 => Ok(Self::Clock50MHz),
             3 => Ok(Self::Clock40MHz),
-            _ => Err(format_err!("Unknown fifo clock configuration {}", num)),
+            _ => Err(format_general_err!(
+                "Unknown fifo clock configuration {}",
+                num
+            )),
         }
     }
 
@@ -219,7 +224,7 @@ impl FT60xChannelConfig {
             2 => Ok(Self::OneChannel),
             3 => Ok(Self::OneChannelOutPipe),
             4 => Ok(Self::OneChannelInPipe),
-            _ => Err(format_err!("Unknown channel configuration {}", num)),
+            _ => Err(format_general_err!("Unknown channel configuration {}", num)),
         }
     }
 
@@ -235,6 +240,8 @@ impl FT60xChannelConfig {
 }
 
 pub mod ft60x_flash_rom_detection {
+    use crate::Result;
+
     #[derive(Debug)]
     pub enum MemoryType {
         Flash,
@@ -296,7 +303,7 @@ pub mod ft60x_flash_rom_detection {
     }
 
     impl FT60xFlashRomDetection {
-        pub fn parse(flags: u8) -> Result<FT60xFlashRomDetection, failure::Error> {
+        pub fn parse(flags: u8) -> Result<FT60xFlashRomDetection> {
             let memory_type = match flags & (1 << 0) {
                 0 => MemoryType::Flash,
                 _ => MemoryType::ROM,

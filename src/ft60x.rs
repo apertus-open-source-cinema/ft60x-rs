@@ -6,7 +6,6 @@ use std::time::Duration;
 use crate::ft60x_config::FT60xConfig;
 use crate::ringbuf::{RingBuf, RingBufConsumer};
 use crate::Result;
-use failure::format_err;
 use owning_ref::OwningHandle;
 use std::sync::Arc;
 
@@ -25,10 +24,14 @@ impl FT60x {
             Ok(Box::new(
                 context
                     .as_ref()
-                    .ok_or_else(|| format_err!("null pointer for context received"))?
+                    .ok_or_else(|| format_general_err!("null pointer for context received"))?
                     .open_device_with_vid_pid(vid, pid)
                     .ok_or_else(|| {
-                        format_err!("No device with VID {:#x} and PID {:#x} was found", vid, pid)
+                        format_general_err!(
+                            "No device with VID {:#x} and PID {:#x} was found",
+                            vid,
+                            pid
+                        )
                     })?,
             ))
         });
@@ -50,7 +53,7 @@ impl FT60x {
             Duration::new(1, 0),
         )?;
 
-        assert_eq!(read, 152);
+        ensure!(read == 152, "got wrong number of config bytes");
         FT60xConfig::parse(buf)
     }
 
@@ -65,7 +68,7 @@ impl FT60x {
             Duration::new(1, 0),
         )?;
 
-        assert_eq!(written, 152);
+        ensure!(written == 152, "wrote wrong number of config bytes");
         Ok(())
     }
 
@@ -107,16 +110,30 @@ impl FT60x {
             // The FT60x doesn't seem to like too many outstanding requests
             if i > 50 {
                 let mut transfer = async_group.wait_any()?;
-                assert_eq!(transfer.buffer().len(), transfer.actual().len());
+                ensure!(
+                    transfer.buffer().len() == transfer.actual().len(),
+                    "FT60x did not return enough data. requested {} got {}",
+                    transfer.buffer().len(),
+                    transfer.actual().len()
+                );
                 collected += 1;
             }
         }
         while let Ok(mut transfer) = async_group.wait_any() {
-            assert_eq!(transfer.buffer().len(), transfer.actual().len());
+            ensure!(
+                transfer.buffer().len() == transfer.actual().len(),
+                "FT60x did not return enough data. requested {} got {}",
+                transfer.buffer().len(),
+                transfer.actual().len()
+            );
             collected += 1;
         }
-        assert_eq!(collected, mut_chunks_len);
-
+        ensure!(
+            collected == mut_chunks_len,
+            "FT60x did not answer all chunks within timeout. Requested {} got an answer for {}",
+            mut_chunks_len,
+            collected
+        );
         Ok(())
     }
 
@@ -127,7 +144,7 @@ impl FT60x {
 
         std::thread::spawn(move || {
             while producer
-                .with_next_buffer(|buf| self.read_exact(buf))
+                .with_next_buffer(|buf| self.read_exact(buf).unwrap())
                 .is_ok()
             {}
         });

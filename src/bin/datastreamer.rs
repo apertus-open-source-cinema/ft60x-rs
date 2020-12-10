@@ -5,11 +5,11 @@ use ft60x::ft60x::{FT60x, DEFAULT_PID, DEFAULT_VID};
 use std::io::{self, Write};
 use std::time::SystemTime;
 
-type Result<T> = std::result::Result<T, failure::Error>;
+type Result<T> = std::result::Result<T, ft60x::Error>;
 
 fn main() -> Result<()> {
     let ft60x = FT60x::new(DEFAULT_VID, DEFAULT_PID)?;
-    let mut consumer = ft60x.data_stream(1024 * 1024 * 512)?;
+    let mut consumer = ft60x.data_stream(1024 * 1024 * 128)?;
 
     let mut start = SystemTime::now();
     while consumer
