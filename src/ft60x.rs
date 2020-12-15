@@ -7,7 +7,10 @@ use crate::ft60x_config::FT60xConfig;
 use crate::ringbuf::{RingBuf, RingBufConsumer};
 use crate::Result;
 use owning_ref::OwningHandle;
+use std::iter::once;
+use std::sync::mpsc::{sync_channel, Receiver, SyncSender};
 use std::sync::Arc;
+use std::thread;
 
 pub const DEFAULT_PID: u16 = 0x601f;
 pub const DEFAULT_VID: u16 = 0x0403;
@@ -17,6 +20,7 @@ pub struct FT60x {
     device: OwningHandle<Arc<Context>, Box<DeviceHandle<'static>>>,
     streaming_mode: bool,
 }
+
 impl FT60x {
     pub fn new(vid: u16, pid: u16) -> Result<Self> {
         let context = Arc::new(Context::new()?);
@@ -89,7 +93,7 @@ impl FT60x {
         Ok(())
     }
 
-    /// it es recommended to read multiples of 32Kb
+    /// it is recommended to read multiples of 32Kb
     pub fn read_exact(&mut self, buf: &mut [u8]) -> Result<()> {
         self.set_streaming_mode()?;
 
@@ -100,15 +104,8 @@ impl FT60x {
 
         let mut async_group = AsyncGroup::new(&self.context);
         for (i, chunk) in mut_chunks.enumerate() {
-            async_group.submit(Transfer::bulk(
-                &self.device,
-                0x82,
-                chunk,
-                Duration::new(1, 0),
-            ))?;
-
             // The FT60x doesn't seem to like too many outstanding requests
-            if i > 50 {
+            if i > 500 {
                 let mut transfer = async_group.wait_any()?;
                 ensure!(
                     transfer.buffer().len() == transfer.actual().len(),
@@ -118,6 +115,13 @@ impl FT60x {
                 );
                 collected += 1;
             }
+
+            async_group.submit(Transfer::bulk(
+                &self.device,
+                0x82,
+                chunk,
+                Duration::new(1, 0),
+            ))?;
         }
         while let Ok(mut transfer) = async_group.wait_any() {
             ensure!(
@@ -137,8 +141,122 @@ impl FT60x {
         Ok(())
     }
 
-    /// it es recommended to request multiples of 32Kb
-    pub fn data_stream(mut self, bufsize: usize) -> Result<RingBufConsumer<Vec<u8>>> {
+    // starts a thread with which you can send empty buffers and receive full buffers from
+    // allows for interleaved data transfers (without loosing data)
+    pub fn data_stream_mpsc(
+        mut self,
+        in_flight_buffers: usize,
+    ) -> (SyncSender<Vec<u8>>, Receiver<Vec<u8>>) {
+        let (empty_buffer_tx, empty_buffer_rx) = sync_channel::<Vec<u8>>(in_flight_buffers);
+        let (full_buffer_tx, full_buffer_rx) = sync_channel(in_flight_buffers);
+
+        let mut thread_fn = move || {
+            self.set_streaming_mode().unwrap();
+
+            let blocksize: usize = 32 * 1024; // 32 Kb seems to be the sweet spot for the ft601
+
+            let mut async_group_buffer: Vec<(Vec<u8>, AsyncGroup)> = Vec::new();
+
+            let mut outstanding = 0;
+            for mut current_buffer in empty_buffer_rx.iter() {
+                let mut current_async_group = AsyncGroup::new(&self.context);
+                for chunk in unsafe {
+                    // the rust compiler cant prove the lifetime here.
+                    // we are dropping the async group together with ending to write to the buffer
+                    // so for the relevant timeframe, the pointers to the chunks of that buffer are valid.
+                    std::mem::transmute::<&mut _, &'static mut Vec<u8>>(&mut current_buffer)
+                }
+                .chunks_mut(blocksize)
+                {
+                    // The FT60x doesn't seem to like too many outstanding requests
+                    if outstanding > 500 {
+                        let mut to_ship = None;
+                        for (i, async_group) in async_group_buffer
+                            .iter_mut()
+                            .map(|v| &mut v.1)
+                            .chain(once(&mut current_async_group))
+                            .enumerate()
+                        {
+                            match async_group.wait_any() {
+                                Ok(mut transfer) => {
+                                    ensure!(
+                                        transfer.buffer().len() == transfer.actual().len(),
+                                        "FT60x did not return enough data. requested {} got {}",
+                                        transfer.buffer().len(),
+                                        transfer.actual().len()
+                                    );
+                                    outstanding -= 1;
+                                    break;
+                                }
+                                Err(rusb::Error::NotFound) => {
+                                    assert_eq!(to_ship, None);
+                                    assert_eq!(i, 0);
+                                    to_ship = Some(i);
+                                }
+                                Err(_) => panic!(),
+                            }
+                        }
+
+                        if let Some(i) = to_ship {
+                            if i < async_group_buffer.len() {
+                                full_buffer_tx.send(async_group_buffer.remove(i).0).unwrap();
+                            }
+                        }
+                    }
+
+                    current_async_group.submit(Transfer::bulk(
+                        &self.device,
+                        0x82,
+                        chunk,
+                        Duration::new(1, 0),
+                    ))?;
+                    outstanding += 1;
+                }
+                async_group_buffer.push((current_buffer, current_async_group));
+            }
+
+            let mut to_ship = None;
+            for (i, async_group) in async_group_buffer.iter_mut().map(|v| &mut v.1).enumerate() {
+                match async_group.wait_any() {
+                    Ok(mut transfer) => {
+                        ensure!(
+                            transfer.buffer().len() == transfer.actual().len(),
+                            "FT60x did not return enough data. requested {} got {}",
+                            transfer.buffer().len(),
+                            transfer.actual().len()
+                        );
+                        break;
+                    }
+                    Err(rusb::Error::NotFound) => {
+                        assert_eq!(to_ship, None);
+                        assert_eq!(i, 0);
+                        to_ship = Some(i);
+                    }
+                    Err(_) => panic!(),
+                }
+            }
+
+            if let Some(i) = to_ship {
+                if i < async_group_buffer.len() {
+                    full_buffer_tx.send(async_group_buffer.remove(i).0).unwrap();
+                }
+            }
+
+            Ok(())
+        };
+
+        thread::Builder::new()
+            .name("ft60x-rx".to_string())
+            .spawn(move || {
+                thread_fn().unwrap();
+            })
+            .unwrap();
+
+        (empty_buffer_tx, full_buffer_rx)
+    }
+
+    /// it is recommended to request multiples of 32Kb
+    pub fn data_stream_ringbuf(mut self, bufsize: usize) -> Result<RingBufConsumer<Vec<u8>>> {
         let (mut producer, consumer) =
             RingBuf::<Vec<u8>>::create_channel_with_default_value(4, vec![0u8; bufsize]);
 
