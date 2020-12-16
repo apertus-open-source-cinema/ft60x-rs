@@ -4,14 +4,15 @@ use rusb::{
 use std::time::Duration;
 
 use crate::ft60x_config::FT60xConfig;
+#[cfg(feature = "ringbuf")]
 use crate::ringbuf::{RingBuf, RingBufConsumer};
 use crate::Result;
+use bitflags::_core::ops::DerefMut;
 use owning_ref::OwningHandle;
 use std::iter::once;
 use std::sync::mpsc::{sync_channel, Receiver, SyncSender};
 use std::sync::Arc;
 use std::thread;
-use bitflags::_core::ops::{DerefMut};
 use std::thread::JoinHandle;
 
 pub const DEFAULT_PID: u16 = 0x601f;
@@ -148,7 +149,10 @@ impl FT60x {
     pub fn data_stream_mpsc<T>(
         mut self,
         in_flight_buffers: usize,
-    ) -> (SyncSender<T>, Receiver<Result<T>>, JoinHandle<()>) where T: DerefMut<Target=[u8]> + Send + Sync + 'static {
+    ) -> (SyncSender<T>, Receiver<Result<T>>, JoinHandle<()>)
+    where
+        T: DerefMut<Target = [u8]> + Send + Sync + 'static,
+    {
         let (empty_buffer_tx, empty_buffer_rx) = sync_channel::<T>(in_flight_buffers);
         let (full_buffer_tx, full_buffer_rx) = sync_channel::<Result<T>>(in_flight_buffers);
         let full_buffer_tx2 = full_buffer_tx.clone();
@@ -196,13 +200,19 @@ impl FT60x {
                                     assert_eq!(i, 0);
                                     to_ship = Some(i);
                                 }
-                                Err(e) => return Err(format_general_err!("error while waiting for a transfer to complete: {:?}", e)),
+                                Err(e) => {
+                                    return Err(format_general_err!(
+                                        "error while waiting for a transfer to complete: {:?}",
+                                        e
+                                    ))
+                                }
                             }
                         }
 
                         if let Some(i) = to_ship {
                             if i < async_group_buffer.len() {
-                                full_buffer_tx.send(Ok(async_group_buffer.remove(i).0))
+                                full_buffer_tx
+                                    .send(Ok(async_group_buffer.remove(i).0))
                                     .map_err(|_| format_general_err!("mpsc send error"))?;
                             }
                         }
@@ -242,7 +252,8 @@ impl FT60x {
 
             if let Some(i) = to_ship {
                 if i < async_group_buffer.len() {
-                    full_buffer_tx.send(Ok(async_group_buffer.remove(i).0))
+                    full_buffer_tx
+                        .send(Ok(async_group_buffer.remove(i).0))
                         .map_err(|_| format_general_err!("mpsc send error"))?;
                 }
             }
@@ -257,12 +268,14 @@ impl FT60x {
                 if let Err(e) = result {
                     full_buffer_tx2.send(Err(e)).unwrap();
                 }
-            }).unwrap();
+            })
+            .unwrap();
 
         (empty_buffer_tx, full_buffer_rx, join_handle)
     }
 
     /// it is recommended to request multiples of 32Kb
+    #[cfg(feature = "ringbuf")]
     pub fn data_stream_ringbuf(mut self, bufsize: usize) -> Result<RingBufConsumer<Vec<u8>>> {
         let (mut producer, consumer) =
             RingBuf::<Vec<u8>>::create_channel_with_default_value(4, vec![0u8; bufsize]);

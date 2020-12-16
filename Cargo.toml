@@ -10,3 +10,6 @@ byteorder = "1.3.4"
 bitflags = "1.2.1"
 owning_ref = "0.4.1"
 thiserror = "1.0.22"
+
+[features]
+ringbuf = []

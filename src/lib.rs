@@ -1,4 +1,4 @@
-#![feature(get_mut_unchecked)]
+#![cfg_attr(feature = "ringbuf", feature(get_mut_unchecked))]
 
 use bitflags::_core::str::Utf8Error;
 use std::io;
@@ -42,4 +42,5 @@ type Result<T> = std::result::Result<T, Error>;
 
 pub mod ft60x;
 pub mod ft60x_config;
+#[cfg(feature = "ringbuf")]
 pub mod ringbuf;
