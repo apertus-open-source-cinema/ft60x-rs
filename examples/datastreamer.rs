@@ -10,7 +10,7 @@ type Result<T> = std::result::Result<T, ft60x::Error>;
 
 fn main() -> Result<()> {
     let ft60x = FT60x::new(DEFAULT_VID, DEFAULT_PID)?;
-    let (empty_buffer_tx, full_buffer_rx) = ft60x.data_stream_mpsc(10);
+    let (empty_buffer_tx, full_buffer_rx, _) = ft60x.data_stream_mpsc(10);
 
     thread::spawn(move || loop {
         empty_buffer_tx.send(vec![0; 1024 * 1024 * 128]).unwrap();
@@ -18,9 +18,10 @@ fn main() -> Result<()> {
 
     let mut start = SystemTime::now();
     for buf in full_buffer_rx.iter() {
-        io::stdout().write_all(&*buf).unwrap();
+        let buffer = buf?;
+        io::stdout().write_all(&*buffer).unwrap();
 
-        let bytes = buf.len() as f64;
+        let bytes = buffer.len() as f64;
         let elapsed = start.elapsed().unwrap().as_secs_f64();
         start = SystemTime::now();
         eprintln!(

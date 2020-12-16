@@ -11,6 +11,8 @@ use std::iter::once;
 use std::sync::mpsc::{sync_channel, Receiver, SyncSender};
 use std::sync::Arc;
 use std::thread;
+use bitflags::_core::ops::{DerefMut};
+use std::thread::JoinHandle;
 
 pub const DEFAULT_PID: u16 = 0x601f;
 pub const DEFAULT_VID: u16 = 0x0403;
@@ -143,19 +145,20 @@ impl FT60x {
 
     // starts a thread with which you can send empty buffers and receive full buffers from
     // allows for interleaved data transfers (without loosing data)
-    pub fn data_stream_mpsc(
+    pub fn data_stream_mpsc<T>(
         mut self,
         in_flight_buffers: usize,
-    ) -> (SyncSender<Vec<u8>>, Receiver<Vec<u8>>) {
-        let (empty_buffer_tx, empty_buffer_rx) = sync_channel::<Vec<u8>>(in_flight_buffers);
-        let (full_buffer_tx, full_buffer_rx) = sync_channel(in_flight_buffers);
+    ) -> (SyncSender<T>, Receiver<Result<T>>, JoinHandle<()>) where T: DerefMut<Target=[u8]> + Send + Sync + 'static {
+        let (empty_buffer_tx, empty_buffer_rx) = sync_channel::<T>(in_flight_buffers);
+        let (full_buffer_tx, full_buffer_rx) = sync_channel::<Result<T>>(in_flight_buffers);
+        let full_buffer_tx2 = full_buffer_tx.clone();
 
         let mut thread_fn = move || {
-            self.set_streaming_mode().unwrap();
+            self.set_streaming_mode()?;
 
             let blocksize: usize = 32 * 1024; // 32 Kb seems to be the sweet spot for the ft601
 
-            let mut async_group_buffer: Vec<(Vec<u8>, AsyncGroup)> = Vec::new();
+            let mut async_group_buffer: Vec<(T, AsyncGroup)> = Vec::new();
 
             let mut outstanding = 0;
             for mut current_buffer in empty_buffer_rx.iter() {
@@ -164,7 +167,7 @@ impl FT60x {
                     // the rust compiler cant prove the lifetime here.
                     // we are dropping the async group together with ending to write to the buffer
                     // so for the relevant timeframe, the pointers to the chunks of that buffer are valid.
-                    std::mem::transmute::<&mut _, &'static mut Vec<u8>>(&mut current_buffer)
+                    std::mem::transmute::<&mut T, &'static mut T>(&mut current_buffer)
                 }
                 .chunks_mut(blocksize)
                 {
@@ -193,13 +196,14 @@ impl FT60x {
                                     assert_eq!(i, 0);
                                     to_ship = Some(i);
                                 }
-                                Err(_) => panic!(),
+                                Err(e) => return Err(format_general_err!("error while waiting for a transfer to complete: {:?}", e)),
                             }
                         }
 
                         if let Some(i) = to_ship {
                             if i < async_group_buffer.len() {
-                                full_buffer_tx.send(async_group_buffer.remove(i).0).unwrap();
+                                full_buffer_tx.send(Ok(async_group_buffer.remove(i).0))
+                                    .map_err(|_| format_general_err!("mpsc send error"))?;
                             }
                         }
                     }
@@ -238,21 +242,24 @@ impl FT60x {
 
             if let Some(i) = to_ship {
                 if i < async_group_buffer.len() {
-                    full_buffer_tx.send(async_group_buffer.remove(i).0).unwrap();
+                    full_buffer_tx.send(Ok(async_group_buffer.remove(i).0))
+                        .map_err(|_| format_general_err!("mpsc send error"))?;
                 }
             }
 
             Ok(())
         };
 
-        thread::Builder::new()
+        let join_handle = thread::Builder::new()
             .name("ft60x-rx".to_string())
             .spawn(move || {
-                thread_fn().unwrap();
-            })
-            .unwrap();
+                let result = thread_fn();
+                if let Err(e) = result {
+                    full_buffer_tx2.send(Err(e)).unwrap();
+                }
+            }).unwrap();
 
-        (empty_buffer_tx, full_buffer_rx)
+        (empty_buffer_tx, full_buffer_rx, join_handle)
     }
 
     /// it is recommended to request multiples of 32Kb
